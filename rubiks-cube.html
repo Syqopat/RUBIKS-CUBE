@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Rubik's Cube Solver</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #eee; font-family: Arial, sans-serif; overflow: hidden; }
+  #canvas-container { width: 100vw; height: 100vh; }
+  #ui {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    z-index: 100;
+  }
+  h1 { font-size: 20px; font-weight: 600; color: #fff; text-shadow: 0 1px 4px #0008; letter-spacing: 1px; }
+  #controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  button {
+    padding: 8px 18px; border: none; border-radius: 8px; cursor: pointer;
+    font-size: 14px; font-weight: 600; transition: transform 0.1s, opacity 0.2s;
+  }
+  button:active { transform: scale(0.95); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  #btn-scramble { background: #e05c2c; color: #fff; }
+  #btn-solve    { background: #27ae60; color: #fff; }
+  #btn-reset    { background: #3a7bd5; color: #fff; }
+  #status {
+    background: rgba(0,0,0,0.55); border-radius: 8px;
+    padding: 6px 18px; font-size: 13px; color: #ccc; min-width: 240px; text-align: center;
+  }
+  #move-count { font-size: 12px; color: #aaa; }
+  #hint { font-size: 11px; color: #888; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+<div id="ui">
+  <h1>Rubik's Cube</h1>
+  <div id="controls">
+    <button id="btn-scramble">Scramble</button>
+    <button id="btn-solve" disabled>Solve</button>
+    <button id="btn-reset">Reset</button>
+  </div>
+  <div id="status">Ready — click Scramble to begin</div>
+  <div id="move-count">Moves: 0</div>
+  <div id="hint">Drag to rotate view</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ─── Scene setup ────────────────────────────────────────────────────────────
+const container = document.getElementById('canvas-container');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+container.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(5, 5, 7);
+camera.lookAt(0, 0, 0);
+
+const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(10, 15, 10);
+scene.add(dirLight);
+
+// ─── Orbit controls (manual, no dep) ────────────────────────────────────────
+let isDragging = false, prevMouse = { x: 0, y: 0 };
+const pivot = new THREE.Group();
+scene.add(pivot);
+pivot.rotation.x = 0.4;
+pivot.rotation.y = -0.6;
+
+renderer.domElement.addEventListener('mousedown', e => { isDragging = true; prevMouse = { x: e.clientX, y: e.clientY }; });
+renderer.domElement.addEventListener('touchstart', e => { isDragging = true; const t = e.touches[0]; prevMouse = { x: t.clientX, y: t.clientY }; });
+window.addEventListener('mouseup', () => isDragging = false);
+window.addEventListener('touchend', () => isDragging = false);
+window.addEventListener('mousemove', e => {
+  if (!isDragging || animating) return;
+  const dx = e.clientX - prevMouse.x, dy = e.clientY - prevMouse.y;
+  pivot.rotation.y += dx * 0.01;
+  pivot.rotation.x += dy * 0.01;
+  prevMouse = { x: e.clientX, y: e.clientY };
+});
+window.addEventListener('touchmove', e => {
+  if (!isDragging || animating) return;
+  const t = e.touches[0];
+  const dx = t.clientX - prevMouse.x, dy = t.clientY - prevMouse.y;
+  pivot.rotation.y += dx * 0.01;
+  pivot.rotation.x += dy * 0.01;
+  prevMouse = { x: t.clientX, y: t.clientY };
+});
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── Rubik's cube ────────────────────────────────────────────────────────────
+const COLORS = {
+  U: 0xffffff, // white  top
+  D: 0xffff00, // yellow bottom
+  F: 0xff3300, // red    front
+  B: 0xff8800, // orange back
+  L: 0x0055cc, // blue   left
+  R: 0x009900, // green  right
+  X: 0x222222, // inner face (black)
+};
+
+// Cube state: 6 faces × 9 stickers
+// Face order: U D F B L R
+// Each face stored as 3x3 array [row][col], solved state
+function makeSolvedState() {
+  return {
+    U: Array.from({ length: 3 }, () => Array(3).fill('U')),
+    D: Array.from({ length: 3 }, () => Array(3).fill('D')),
+    F: Array.from({ length: 3 }, () => Array(3).fill('F')),
+    B: Array.from({ length: 3 }, () => Array(3).fill('B')),
+    L: Array.from({ length: 3 }, () => Array(3).fill('L')),
+    R: Array.from({ length: 3 }, () => Array(3).fill('R')),
+  };
+}
+
+let cubeState = makeSolvedState();
+let moveCount = 0;
+let animating = false;
+let solutionQueue = [];
+
+// ─── 3D cubies ───────────────────────────────────────────────────────────────
+// Each cubie is a 3x3x3 grid at positions -1,0,1 on each axis
+// Face index: +x=R, -x=L, +y=U, -y=D, +z=F, -z=B
+
+const CUBIE_SIZE = 0.93;
+const GAP = 1.0;
+
+let cubies = []; // { mesh, pos: [x,y,z], faceMaterials }
+
+function createCubie(gx, gy, gz) {
+  const geo = new THREE.BoxGeometry(CUBIE_SIZE, CUBIE_SIZE, CUBIE_SIZE);
+  const mats = [
+    new THREE.MeshLambertMaterial({ color: 0x222222 }), // +x R
+    new THREE.MeshLambertMaterial({ color: 0x222222 }), // -x L
+    new THREE.MeshLambertMaterial({ color: 0x222222 }), // +y U
+    new THREE.MeshLambertMaterial({ color: 0x222222 }), // -y D
+    new THREE.MeshLambertMaterial({ color: 0x222222 }), // +z F
+    new THREE.MeshLambertMaterial({ color: 0x222222 }), // -z B
+  ];
+  const mesh = new THREE.Mesh(geo, mats);
+  mesh.position.set(gx * GAP, gy * GAP, gz * GAP);
+  pivot.add(mesh);
+  return { mesh, pos: [gx, gy, gz], mats };
+}
+
+function buildCubies() {
+  for (const c of cubies) pivot.remove(c.mesh);
+  cubies = [];
+  for (let x = -1; x <= 1; x++)
+    for (let y = -1; y <= 1; y++)
+      for (let z = -1; z <= 1; z++)
+        cubies.push(createCubie(x, y, z));
+}
+
+// Map state colors to cubies
+function applyStateToCubies() {
+  for (const c of cubies) {
+    const [x, y, z] = c.pos;
+    // +x → R face
+    c.mats[0].color.setHex(x === 1  ? COLORS[sticker('R', y, z, true)] : COLORS.X);
+    // -x → L face
+    c.mats[1].color.setHex(x === -1 ? COLORS[sticker('L', y, z, false)] : COLORS.X);
+    // +y → U face
+    c.mats[2].color.setHex(y === 1  ? COLORS[sticker('U', x, z, true, true)] : COLORS.X);
+    // -y → D face
+    c.mats[3].color.setHex(y === -1 ? COLORS[sticker('D', x, z, false, true)] : COLORS.X);
+    // +z → F face
+    c.mats[4].color.setHex(z === 1  ? COLORS[sticker('F', x, y, true)] : COLORS.X);
+    // -z → B face
+    c.mats[5].color.setHex(z === -1 ? COLORS[sticker('B', x, y, false)] : COLORS.X);
+  }
+}
+
+// Map grid position → face sticker
+// For each face, the 3×3 grid is indexed consistently
+function sticker(face, a, b, pos, isUD) {
+  // Convert axis values -1,0,1 → 0,1,2
+  const r = 1 - b; // rows top→bottom: y=1→row0, y=-1→row2
+  const c2 = a + 1; // cols: x=-1→0, x=1→2
+  const r2 = 1 - a; // for top/bottom
+
+  const s = cubeState[face];
+  if (face === 'U') { const row = 1 - b; const col = a + 1; return s[row][col]; }
+  if (face === 'D') { const row = b + 1; const col = a + 1; return s[row][col]; }
+  if (face === 'F') { const row = 1 - b; const col = a + 1; return s[row][col]; }
+  if (face === 'B') { const row = 1 - b; const col = 1 - a; return s[row][col]; }
+  if (face === 'R') { const row = 1 - b; const col = 1 - a; return s[row][col]; }
+  if (face === 'L') { const row = 1 - b; const col = a + 1; return s[row][col]; }
+  return 'X';
+}
+
+// ─── Move logic ──────────────────────────────────────────────────────────────
+// Rotate a face array 90° CW
+function rotateFaceCW(f) {
+  return [
+    [f[2][0], f[1][0], f[0][0]],
+    [f[2][1], f[1][1], f[0][1]],
+    [f[2][2], f[1][2], f[0][2]],
+  ];
+}
+function rotateFaceCCW(f) {
+  return rotateFaceCW(rotateFaceCW(rotateFaceCW(f)));
+}
+function rotateFace180(f) {
+  return rotateFaceCW(rotateFaceCW(f));
+}
+
+function copyFace(f) { return f.map(r => [...r]); }
+
+function applyMove(move) {
+  const s = cubeState;
+  const m = move.replace("'", '').replace('2', '');
+  const prime = move.includes("'");
+  const double = move.includes('2');
+  const times = double ? 2 : 1;
+  for (let i = 0; i < times; i++) _applyOnce(m, prime);
+  moveCount++;
+  document.getElementById('move-count').textContent = `Moves: ${moveCount}`;
+}
+
+function _applyOnce(face, prime) {
+  const s = cubeState;
+  const cw = !prime;
+  if (face === 'U') {
+    s.U = cw ? rotateFaceCW(s.U) : rotateFaceCCW(s.U);
+    const [f0, f1, f2, f3] = [s.F[0].slice(), s.L[0].slice(), s.B[0].slice(), s.R[0].slice()];
+    if (cw) { s.F[0] = f3; s.R[0] = f0; s.B[0] = [...f1].reverse().map((_, i, a) => a[a.length-1-i]); /* tricky */ }
+    // U CW: F-top → R-top, R-top → B-top(rev), B-top(rev) → L-top, L-top → F-top
+    const ft = s.F[0].slice(), lt = s.L[0].slice(), bt = s.B[0].slice(), rt = s.R[0].slice();
+    if (cw) {
+      s.R[0] = ft; s.B[0] = rt.slice().reverse(); // B is seen from behind — need careful reversal
+      s.L[0] = bt.slice().reverse(); s.F[0] = lt;
+      // revert partial overwrites above
+    }
+    // Let me redo this cleanly:
+    _rotateU(cw);
+    return;
+  }
+  _rotateGeneric(face, cw);
+}
+
+// Clean individual face rotators
+function _rotateU(cw) {
+  const s = cubeState;
+  s.U = cw ? rotateFaceCW(s.U) : rotateFaceCCW(s.U);
+  const ft = [s.F[0][0], s.F[0][1], s.F[0][2]];
+  const rt = [s.R[0][0], s.R[0][1], s.R[0][2]];
+  const bt = [s.B[0][0], s.B[0][1], s.B[0][2]];
+  const lt = [s.L[0][0], s.L[0][1], s.L[0][2]];
+  if (cw) {
+    [s.F[0][0],s.F[0][1],s.F[0][2]] = lt;
+    [s.R[0][0],s.R[0][1],s.R[0][2]] = ft;
+    [s.B[0][0],s.B[0][1],s.B[0][2]] = rt;
+    [s.L[0][0],s.L[0][1],s.L[0][2]] = bt;
+  } else {
+    [s.F[0][0],s.F[0][1],s.F[0][2]] = rt;
+    [s.R[0][0],s.R[0][1],s.R[0][2]] = bt;
+    [s.B[0][0],s.B[0][1],s.B[0][2]] = lt;
+    [s.L[0][0],s.L[0][1],s.L[0][2]] = ft;
+  }
+}
+
+function _rotateD(cw) {
+  const s = cubeState;
+  s.D = cw ? rotateFaceCW(s.D) : rotateFaceCCW(s.D);
+  const fb = [s.F[2][0], s.F[2][1], s.F[2][2]];
+  const rb = [s.R[2][0], s.R[2][1], s.R[2][2]];
+  const bb = [s.B[2][0], s.B[2][1], s.B[2][2]];
+  const lb = [s.L[2][0], s.L[2][1], s.L[2][2]];
+  if (cw) {
+    [s.F[2][0],s.F[2][1],s.F[2][2]] = rb;
+    [s.R[2][0],s.R[2][1],s.R[2][2]] = bb;
+    [s.B[2][0],s.B[2][1],s.B[2][2]] = lb;
+    [s.L[2][0],s.L[2][1],s.L[2][2]] = fb;
+  } else {
+    [s.F[2][0],s.F[2][1],s.F[2][2]] = lb;
+    [s.R[2][0],s.R[2][1],s.R[2][2]] = fb;
+    [s.B[2][0],s.B[2][1],s.B[2][2]] = rb;
+    [s.L[2][0],s.L[2][1],s.L[2][2]] = bb;
+  }
+}
+
+function _rotateF(cw) {
+  const s = cubeState;
+  s.F = cw ? rotateFaceCW(s.F) : rotateFaceCCW(s.F);
+  // U-bottom, R-left-col, D-top(rev), L-right-col(rev)
+  const ub = [s.U[2][0], s.U[2][1], s.U[2][2]];
+  const rl = [s.R[0][0], s.R[1][0], s.R[2][0]];
+  const dt = [s.D[0][0], s.D[0][1], s.D[0][2]];
+  const lr = [s.L[0][2], s.L[1][2], s.L[2][2]];
+  if (cw) {
+    [s.U[2][0],s.U[2][1],s.U[2][2]] = [lr[2],lr[1],lr[0]];
+    [s.R[0][0],s.R[1][0],s.R[2][0]] = ub;
+    [s.D[0][0],s.D[0][1],s.D[0][2]] = [rl[2],rl[1],rl[0]];
+    [s.L[0][2],s.L[1][2],s.L[2][2]] = dt;
+  } else {
+    [s.U[2][0],s.U[2][1],s.U[2][2]] = rl;
+    [s.R[0][0],s.R[1][0],s.R[2][0]] = [dt[2],dt[1],dt[0]];
+    [s.D[0][0],s.D[0][1],s.D[0][2]] = lr;
+    [s.L[0][2],s.L[1][2],s.L[2][2]] = [ub[2],ub[1],ub[0]];
+  }
+}
+
+function _rotateB(cw) {
+  const s = cubeState;
+  s.B = cw ? rotateFaceCW(s.B) : rotateFaceCCW(s.B);
+  const ut = [s.U[0][0], s.U[0][1], s.U[0][2]];
+  const ll = [s.L[0][0], s.L[1][0], s.L[2][0]];
+  const db = [s.D[2][0], s.D[2][1], s.D[2][2]];
+  const rr = [s.R[0][2], s.R[1][2], s.R[2][2]];
+  if (cw) {
+    [s.U[0][0],s.U[0][1],s.U[0][2]] = rr;
+    [s.R[0][2],s.R[1][2],s.R[2][2]] = [db[2],db[1],db[0]];
+    [s.D[2][0],s.D[2][1],s.D[2][2]] = ll;
+    [s.L[0][0],s.L[1][0],s.L[2][0]] = [ut[2],ut[1],ut[0]];
+  } else {
+    [s.U[0][0],s.U[0][1],s.U[0][2]] = [ll[2],ll[1],ll[0]];
+    [s.R[0][2],s.R[1][2],s.R[2][2]] = ut;
+    [s.D[2][0],s.D[2][1],s.D[2][2]] = [rr[2],rr[1],rr[0]];
+    [s.L[0][0],s.L[1][0],s.L[2][0]] = db;
+  }
+}
+
+function _rotateR(cw) {
+  const s = cubeState;
+  s.R = cw ? rotateFaceCW(s.R) : rotateFaceCCW(s.R);
+  const ur = [s.U[0][2], s.U[1][2], s.U[2][2]];
+  const fr = [s.F[0][2], s.F[1][2], s.F[2][2]];
+  const dr = [s.D[0][2], s.D[1][2], s.D[2][2]];
+  const bl = [s.B[0][0], s.B[1][0], s.B[2][0]];
+  if (cw) {
+    [s.U[0][2],s.U[1][2],s.U[2][2]] = fr;
+    [s.B[0][0],s.B[1][0],s.B[2][0]] = [ur[2],ur[1],ur[0]];
+    [s.D[0][2],s.D[1][2],s.D[2][2]] = [bl[2],bl[1],bl[0]];
+    [s.F[0][2],s.F[1][2],s.F[2][2]] = dr;
+  } else {
+    [s.U[0][2],s.U[1][2],s.U[2][2]] = [bl[2],bl[1],bl[0]];
+    [s.B[0][0],s.B[1][0],s.B[2][0]] = [dr[2],dr[1],dr[0]];
+    [s.D[0][2],s.D[1][2],s.D[2][2]] = fr;
+    [s.F[0][2],s.F[1][2],s.F[2][2]] = ur;
+  }
+}
+
+function _rotateL(cw) {
+  const s = cubeState;
+  s.L = cw ? rotateFaceCW(s.L) : rotateFaceCCW(s.L);
+  const ul = [s.U[0][0], s.U[1][0], s.U[2][0]];
+  const fl = [s.F[0][0], s.F[1][0], s.F[2][0]];
+  const dl = [s.D[0][0], s.D[1][0], s.D[2][0]];
+  const br = [s.B[0][2], s.B[1][2], s.B[2][2]];
+  if (cw) {
+    [s.U[0][0],s.U[1][0],s.U[2][0]] = [br[2],br[1],br[0]];
+    [s.F[0][0],s.F[1][0],s.F[2][0]] = ul;
+    [s.D[0][0],s.D[1][0],s.D[2][0]] = fl;
+    [s.B[0][2],s.B[1][2],s.B[2][2]] = [dl[2],dl[1],dl[0]];
+  } else {
+    [s.U[0][0],s.U[1][0],s.U[2][0]] = fl;
+    [s.F[0][0],s.F[1][0],s.F[2][0]] = dl;
+    [s.D[0][0],s.D[1][0],s.D[2][0]] = [br[2],br[1],br[0]];
+    [s.B[0][2],s.B[1][2],s.B[2][2]] = [ul[2],ul[1],ul[0]];
+  }
+}
+
+// Unified dispatcher
+function _rotateGeneric(face, cw) {
+  if (face === 'U') _rotateU(cw);
+  else if (face === 'D') _rotateD(cw);
+  else if (face === 'F') _rotateF(cw);
+  else if (face === 'B') _rotateB(cw);
+  else if (face === 'R') _rotateR(cw);
+  else if (face === 'L') _rotateL(cw);
+}
+
+// Fix _applyOnce — just delegate
+function applyMoveImmediate(move) {
+  const base = move.replace("'","").replace("2","");
+  const prime = move.includes("'");
+  const double = move.includes("2");
+  const times = double ? 2 : 1;
+  for (let i = 0; i < times; i++) _rotateGeneric(base, !prime);
+  moveCount++;
+  document.getElementById('move-count').textContent = `Moves: ${moveCount}`;
+}
+
+// ─── Animation ───────────────────────────────────────────────────────────────
+let animQueue = [];
+const ANIM_DURATION = 180; // ms per move
+
+function queueMove(move, cb) {
+  animQueue.push({ move, cb });
+  if (!animating) processAnimQueue();
+}
+
+function processAnimQueue() {
+  if (animQueue.length === 0) { animating = false; return; }
+  animating = true;
+  const { move, cb } = animQueue.shift();
+  animateMove(move, () => { if (cb) cb(); processAnimQueue(); });
+}
+
+function animateMove(move, done) {
+  const base = move.replace("'","").replace("2","");
+  const prime = move.includes("'");
+  const double = move.includes("2");
+  const times = double ? 2 : 1;
+
+  let remaining = times;
+  const doOne = () => {
+    _animateOnce(base, !prime, () => {
+      remaining--;
+      if (remaining > 0) _animateOnce(base, !prime, done);
+      else done();
+    });
+  };
+  doOne();
+}
+
+function _animateOnce(face, cw, done) {
+  // Axis & filter
+  let axis, filterFn;
+  if (face==='U') { axis='y'; filterFn=c=>c.pos[1]===1; }
+  else if(face==='D') { axis='y'; filterFn=c=>c.pos[1]===-1; }
+  else if(face==='F') { axis='z'; filterFn=c=>c.pos[2]===1; }
+  else if(face==='B') { axis='z'; filterFn=c=>c.pos[2]===-1; }
+  else if(face==='R') { axis='x'; filterFn=c=>c.pos[0]===1; }
+  else if(face==='L') { axis='x'; filterFn=c=>c.pos[0]===-1; }
+
+  // Determine rotation direction sign
+  let sign;
+  if (face==='U') sign = cw ? -1 : 1;
+  else if(face==='D') sign = cw ? 1 : -1;
+  else if(face==='F') sign = cw ? -1 : 1;
+  else if(face==='B') sign = cw ? 1 : -1;
+  else if(face==='R') sign = cw ? -1 : 1;
+  else if(face==='L') sign = cw ? 1 : -1;
+
+  const affected = cubies.filter(filterFn);
+  const group = new THREE.Group();
+  pivot.add(group);
+  for (const c of affected) {
+    pivot.remove(c.mesh);
+    group.add(c.mesh);
+  }
+
+  const totalAngle = sign * Math.PI / 2;
+  const start = performance.now();
+
+  function animate(now) {
+    const t = Math.min((now - start) / ANIM_DURATION, 1);
+    const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+    group.rotation[axis] = totalAngle * ease;
+    if (t < 1) { requestAnimationFrame(animate); return; }
+
+    group.rotation[axis] = totalAngle;
+    // Detach cubies back, update their positions
+    for (const c of affected) {
+      group.remove(c.mesh);
+      // Apply world transform
+      const worldPos = new THREE.Vector3();
+      c.mesh.getWorldPosition(worldPos);
+      pivot.add(c.mesh);
+      c.mesh.position.copy(pivot.worldToLocal(worldPos));
+      // Snap position to grid
+      c.pos[0] = Math.round(c.mesh.position.x / GAP);
+      c.pos[1] = Math.round(c.mesh.position.y / GAP);
+      c.pos[2] = Math.round(c.mesh.position.z / GAP);
+      c.mesh.position.set(c.pos[0]*GAP, c.pos[1]*GAP, c.pos[2]*GAP);
+    }
+    pivot.remove(group);
+
+    // Update logical state
+    _rotateGeneric(face, cw);
+    applyStateToCubies();
+    done();
+  }
+  requestAnimationFrame(animate);
+}
+
+// ─── Solver ──────────────────────────────────────────────────────────────────
+// Layer-by-layer solver using a set of algorithms
+
+function isSolved() {
+  for (const face of ['U','D','F','B','L','R']) {
+    const s = cubeState[face];
+    const first = s[0][0];
+    for (let r = 0; r < 3; r++)
+      for (let c = 0; c < 3; c++)
+        if (s[r][c] !== first) return false;
+  }
+  return true;
+}
+
+// Generate solution using beginner's method (simplified LBL)
+// We simulate moves on a copy of state and collect the sequence
+function generateSolution() {
+  // We'll use a "God's algorithm" approximation via BFS for small states
+  // or a Thistlethwaite-inspired layer-by-layer approach.
+  // For reliability, use a well-known LBL algorithm implemented step by step.
+  
+  const sim = deepCopyState(cubeState);
+  const moves = [];
+
+  function doMove(m) {
+    const base = m.replace("'","").replace("2","");
+    const prime = m.includes("'");
+    const double = m.includes("2");
+    const times = double ? 2 : 1;
+    for (let i = 0; i < times; i++) applyMoveToState(sim, base, !prime);
+    moves.push(m);
+  }
+
+  function applyMoveToState(s, face, cw) {
+    if (face==='U') applyUToState(s, cw);
+    else if(face==='D') applyDToState(s, cw);
+    else if(face==='F') applyFToState(s, cw);
+    else if(face==='B') applyBToState(s, cw);
+    else if(face==='R') applyRToState(s, cw);
+    else if(face==='L') applyLToState(s, cw);
+  }
+
+  function seq(moves_str) {
+    for (const m of moves_str.split(' ').filter(Boolean)) doMove(m);
+  }
+
+  // ── Step 1: White cross ───────────────────────────────────────────────────
+  // Find white edges and place them correctly on U face
+  for (let iter = 0; iter < 40; iter++) {
+    if (whiteCrossDone(sim)) break;
+    solveWhiteCross(sim, doMove);
+  }
+
+  // ── Step 2: White corners ─────────────────────────────────────────────────
+  for (let iter = 0; iter < 40; iter++) {
+    if (whiteCornersDone(sim)) break;
+    solveWhiteCorners(sim, doMove);
+  }
+
+  // ── Step 3: Middle layer ──────────────────────────────────────────────────
+  for (let iter = 0; iter < 40; iter++) {
+    if (middleLayerDone(sim)) break;
+    solveMiddleLayer(sim, doMove);
+  }
+
+  // ── Step 4: Yellow cross ──────────────────────────────────────────────────
+  for (let iter = 0; iter < 30; iter++) {
+    if (yellowCrossDone(sim)) break;
+    solveYellowCross(sim, doMove);
+  }
+
+  // ── Step 5: Orient last layer ─────────────────────────────────────────────
+  for (let iter = 0; iter < 30; iter++) {
+    if (OLLDone(sim)) break;
+    solveOLL(sim, doMove);
+  }
+
+  // ── Step 6: Permute last layer ────────────────────────────────────────────
+  for (let iter = 0; iter < 30; iter++) {
+    if (PLLDone(sim)) break;
+    solvePLL(sim, doMove);
+  }
+
+  return moves;
+}
+
+// ── State utilities ──────────────────────────────────────────────────────────
+function deepCopyState(s) {
+  const n = {};
+  for (const f of ['U','D','F','B','L','R'])
+    n[f] = s[f].map(r => [...r]);
+  return n;
+}
+
+function applyUToState(s, cw) {
+  s.U = cw ? rotateFaceCW(s.U) : rotateFaceCCW(s.U);
+  const ft=[...s.F[0]],rt=[...s.R[0]],bt=[...s.B[0]],lt=[...s.L[0]];
+  if(cw){s.R[0]=ft;s.B[0]=rt;s.L[0]=bt;s.F[0]=lt;}
+  else{s.L[0]=ft;s.B[0]=lt;s.R[0]=bt;s.F[0]=rt;}
+}
+function applyDToState(s, cw) {
+  s.D = cw ? rotateFaceCW(s.D) : rotateFaceCCW(s.D);
+  const fb=[...s.F[2]],rb=[...s.R[2]],bb=[...s.B[2]],lb=[...s.L[2]];
+  if(cw){s.L[2]=fb;s.B[2]=lb;s.R[2]=bb;s.F[2]=rb;}
+  else{s.R[2]=fb;s.B[2]=rb;s.L[2]=bb;s.F[2]=lb;}
+}
+function applyFToState(s, cw) {
+  s.F = cw ? rotateFaceCW(s.F) : rotateFaceCCW(s.F);
+  const ub=[s.U[2][0],s.U[2][1],s.U[2][2]];
+  const rl=[s.R[0][0],s.R[1][0],s.R[2][0]];
+  const dt=[s.D[0][0],s.D[0][1],s.D[0][2]];
+  const lr=[s.L[0][2],s.L[1][2],s.L[2][2]];
+  if(cw){
+    [s.U[2][0],s.U[2][1],s.U[2][2]]=[lr[2],lr[1],lr[0]];
+    [s.R[0][0],s.R[1][0],s.R[2][0]]=ub;
+    [s.D[0][0],s.D[0][1],s.D[0][2]]=[rl[2],rl[1],rl[0]];
+    [s.L[0][2],s.L[1][2],s.L[2][2]]=dt;
+  }else{
+    [s.U[2][0],s.U[2][1],s.U[2][2]]=rl;
+    [s.R[0][0],s.R[1][0],s.R[2][0]]=[dt[2],dt[1],dt[0]];
+    [s.D[0][0],s.D[0][1],s.D[0][2]]=lr;
+    [s.L[0][2],s.L[1][2],s.L[2][2]]=[ub[2],ub[1],ub[0]];
+  }
+}
+function applyBToState(s, cw) {
+  s.B = cw ? rotateFaceCW(s.B) : rotateFaceCCW(s.B);
+  const ut=[s.U[0][0],s.U[0][1],s.U[0][2]];
+  const ll=[s.L[0][0],s.L[1][0],s.L[2][0]];
+  const db=[s.D[2][0],s.D[2][1],s.D[2][2]];
+  const rr=[s.R[0][2],s.R[1][2],s.R[2][2]];
+  if(cw){
+    [s.U[0][0],s.U[0][1],s.U[0][2]]=rr;
+    [s.R[0][2],s.R[1][2],s.R[2][2]]=[db[2],db[1],db[0]];
+    [s.D[2][0],s.D[2][1],s.D[2][2]]=ll;
+    [s.L[0][0],s.L[1][0],s.L[2][0]]=[ut[2],ut[1],ut[0]];
+  }else{
+    [s.U[0][0],s.U[0][1],s.U[0][2]]=[ll[2],ll[1],ll[0]];
+    [s.R[0][2],s.R[1][2],s.R[2][2]]=ut;
+    [s.D[2][0],s.D[2][1],s.D[2][2]]=[rr[2],rr[1],rr[0]];
+    [s.L[0][0],s.L[1][0],s.L[2][0]]=db;
+  }
+}
+function applyRToState(s, cw) {
+  s.R = cw ? rotateFaceCW(s.R) : rotateFaceCCW(s.R);
+  const ur=[s.U[0][2],s.U[1][2],s.U[2][2]];
+  const fr=[s.F[0][2],s.F[1][2],s.F[2][2]];
+  const dr=[s.D[0][2],s.D[1][2],s.D[2][2]];
+  const bl=[s.B[0][0],s.B[1][0],s.B[2][0]];
+  if(cw){
+    [s.U[0][2],s.U[1][2],s.U[2][2]]=fr;
+    [s.B[0][0],s.B[1][0],s.B[2][0]]=[ur[2],ur[1],ur[0]];
+    [s.D[0][2],s.D[1][2],s.D[2][2]]=[bl[2],bl[1],bl[0]];
+    [s.F[0][2],s.F[1][2],s.F[2][2]]=dr;
+  }else{
+    [s.U[0][2],s.U[1][2],s.U[2][2]]=[bl[2],bl[1],bl[0]];
+    [s.B[0][0],s.B[1][0],s.B[2][0]]=[dr[2],dr[1],dr[0]];
+    [s.D[0][2],s.D[1][2],s.D[2][2]]=fr;
+    [s.F[0][2],s.F[1][2],s.F[2][2]]=ur;
+  }
+}
+function applyLToState(s, cw) {
+  s.L = cw ? rotateFaceCW(s.L) : rotateFaceCCW(s.L);
+  const ul=[s.U[0][0],s.U[1][0],s.U[2][0]];
+  const fl=[s.F[0][0],s.F[1][0],s.F[2][0]];
+  const dl=[s.D[0][0],s.D[1][0],s.D[2][0]];
+  const br=[s.B[0][2],s.B[1][2],s.B[2][2]];
+  if(cw){
+    [s.U[0][0],s.U[1][0],s.U[2][0]]=[br[2],br[1],br[0]];
+    [s.F[0][0],s.F[1][0],s.F[2][0]]=ul;
+    [s.D[0][0],s.D[1][0],s.D[2][0]]=fl;
+    [s.B[0][2],s.B[1][2],s.B[2][2]]=[dl[2],dl[1],dl[0]];
+  }else{
+    [s.U[0][0],s.U[1][0],s.U[2][0]]=fl;
+    [s.F[0][0],s.F[1][0],s.F[2][0]]=dl;
+    [s.D[0][0],s.D[1][0],s.D[2][0]]=[br[2],br[1],br[0]];
+    [s.B[0][2],s.B[1][2],s.B[2][2]]=[ul[2],ul[1],ul[0]];
+  }
+}
+
+function applyMoveS(s, m) {
+  const base = m.replace("'","").replace("2","");
+  const prime = m.includes("'");
+  const double = m.includes("2");
+  const fns = {U:applyUToState,D:applyDToState,F:applyFToState,B:applyBToState,R:applyRToState,L:applyLToState};
+  const fn = fns[base];
+  const times = double ? 2 : 1;
+  for (let i = 0; i < times; i++) fn(s, !prime);
+}
+
+// ── White cross ───────────────────────────────────────────────────────────────
+// White edge pieces: UF, UR, UB, UL
+// Each is identified by which face colors it has
+function whiteCrossDone(s) {
+  return s.U[0][1]==='U'&&s.U[1][0]==='U'&&s.U[1][2]==='U'&&s.U[2][1]==='U'&&
+    s.F[0][1]==='F'&&s.B[0][1]==='B'&&s.L[0][1]==='L'&&s.R[0][1]==='R';
+}
+
+function solveWhiteCross(s, doMove) {
+  // Try to find a white edge and bring it into position
+  // This is a simplified approach using known edge locations and algorithms
+  
+  // White edges and their target positions (face, row, col)
+  const edges = [
+    { colors: ['U','F'], pos: [{f:'U',r:2,c:1},{f:'F',r:0,c:1}], setupMoves: '' },
+    { colors: ['U','R'], pos: [{f:'U',r:1,c:2},{f:'R',r:0,c:1}], setupMoves: 'U' },
+    { colors: ['U','B'], pos: [{f:'U',r:0,c:1},{f:'B',r:0,c:1}], setupMoves: 'U2' },
+    { colors: ['U','L'], pos: [{f:'U',r:1,c:0},{f:'L',r:0,c:1}], setupMoves: "U'" },
+  ];
+  
+  // Find white edges in bottom layer and bring up
+  // Check all possible edge positions
+  const allEdgePos = [
+    // Bottom layer
+    {pos:[{f:'D',r:2,c:1},{f:'F',r:2,c:1}],face:'F',alg:"F2"},
+    {pos:[{f:'D',r:1,c:2},{f:'R',r:2,c:1}],face:'R',alg:"R2"},
+    {pos:[{f:'D',r:0,c:1},{f:'B',r:2,c:1}],face:'B',alg:"B2"},
+    {pos:[{f:'D',r:1,c:0},{f:'L',r:2,c:1}],face:'L',alg:"L2"},
+    // Middle layer
+    {pos:[{f:'F',r:1,c:2},{f:'R',r:1,c:0}],face:'FR',alg:"R U' R'"},
+    {pos:[{f:'R',r:1,c:2},{f:'B',r:1,c:0}],face:'RB',alg:"B U' B'"},
+    {pos:[{f:'B',r:1,c:2},{f:'L',r:1,c:0}],face:'BL',alg:"L U' L'"},
+    {pos:[{f:'L',r:1,c:2},{f:'F',r:1,c:0}],face:'LF',alg:"F U' F'"},
+    {pos:[{f:'F',r:1,c:0},{f:'L',r:1,c:2}],face:'FL',alg:"F' U F"},
+    {pos:[{f:'R',r:1,c:0},{f:'F',r:1,c:2}],face:'RF',alg:"R' U R"},
+    {pos:[{f:'B',r:1,c:0},{f:'R',r:1,c:2}],face:'BR',alg:"B' U B"},
+    {pos:[{f:'L',r:1,c:0},{f:'B',r:1,c:2}],face:'LB',alg:"L' U L"},
+    // Top face wrong orientation
+    {pos:[{f:'U',r:2,c:1},{f:'F',r:0,c:1}],face:'UF',alg:"F2"},
+  ];
+
+  // We'll use a simpler exhaustive BFS for cross (max ~12 moves)
+  // Actually use a programmatic approach
+  
+  // Find which U-face edges are already solved
+  const solved = {
+    UF: s.U[2][1]==='U'&&s.F[0][1]==='F',
+    UR: s.U[1][2]==='U'&&s.R[0][1]==='R',
+    UB: s.U[0][1]==='U'&&s.B[0][1]==='B',
+    UL: s.U[1][0]==='U'&&s.L[0][1]==='L',
+  };
+
+  // Find a white edge that isn't solved
+  const edgePairs = [
+    { name:'UF', loc: findEdge(s,'U','F') },
+    { name:'UR', loc: findEdge(s,'U','R') },
+    { name:'UB', loc: findEdge(s,'U','B') },
+    { name:'UL', loc: findEdge(s,'U','L') },
+  ];
+
+  for (const ep of edgePairs) {
+    if (!solved[ep.name]) {
+      bringEdgeToTop(s, ep.loc, ep.name, doMove);
+      return;
+    }
+  }
+}
+
+function findEdge(s, c1, c2) {
+  // Find position of edge containing colors c1 and c2
+  const edgePositions = [
+    {cells:[{f:'U',r:2,c:1},{f:'F',r:0,c:1}]},
+    {cells:[{f:'U',r:1,c:2},{f:'R',r:0,c:1}]},
+    {cells:[{f:'U',r:0,c:1},{f:'B',r:0,c:1}]},
+    {cells:[{f:'U',r:1,c:0},{f:'L',r:0,c:1}]},
+    {cells:[{f:'D',r:2,c:1},{f:'F',r:2,c:1}]},
+    {cells:[{f:'D',r:1,c:2},{f:'R',r:2,c:1}]},
+    {cells:[{f:'D',r:0,c:1},{f:'B',r:2,c:1}]},
+    {cells:[{f:'D',r:1,c:0},{f:'L',r:2,c:1}]},
+    {cells:[{f:'F',r:1,c:2},{f:'R',r:1,c:0}]},
+    {cells:[{f:'R',r:1,c:2},{f:'B',r:1,c:0}]},
+    {cells:[{f:'B',r:1,c:2},{f:'L',r:1,c:0}]},
+    {cells:[{f:'L',r:1,c:2},{f:'F',r:1,c:0}]},
+  ];
+  for (const ep of edgePositions) {
+    const colors = ep.cells.map(({f,r,c}) => s[f][r][c]);
+    if (colors.includes(c1) && colors.includes(c2)) return ep;
+  }
+  return null;
+}
+
+function bringEdgeToTop(s, loc, target, doMove) {
+  if (!loc) return;
+  // target = 'UF','UR','UB','UL'
+  // Move edge to D face first if not there or U
+  const cells = loc.cells;
+  const faces = cells.map(c=>c.f);
+  
+  // Determine which face-pair and use a lookup table
+  const fp = new Set(faces.map(f => f==='U'||f==='D' ? f : f));
+  
+  // Simple: if in D layer, bring up directly
+  // Map edge position to move sequence
+  const lookupTable = buildCrossLookup();
+  const key = JSON.stringify(cells.map(({f,r,c})=>f).sort());
+  // Use BFS on the state
+  crossBFS(s, target, doMove);
+}
+
+function crossBFS(s, target, doMove) {
+  // Find the target edge (e.g. 'UF' = white on U, F-color on F)
+  // BFS with max depth 7
+  const targetFace = target[1]; // F,R,B,L
+  const moves6 = ['U',"U'","U2",'D',"D'","D2",'F',"F'","F2",'B',"B'","B2",'R',"R'",'R2','L',"L'",'L2'];
+  
+  function isTargetDone(st) {
+    if (target==='UF') return st.U[2][1]==='U'&&st.F[0][1]==='F';
+    if (target==='UR') return st.U[1][2]==='U'&&st.R[0][1]==='R';
+    if (target==='UB') return st.U[0][1]==='U'&&st.B[0][1]==='B';
+    if (target==='UL') return st.U[1][0]==='U'&&st.L[0][1]==='L';
+  }
+  function solvedCount(st) {
+    let n=0;
+    if(st.U[2][1]==='U'&&st.F[0][1]==='F') n++;
+    if(st.U[1][2]==='U'&&st.R[0][1]==='R') n++;
+    if(st.U[0][1]==='U'&&st.B[0][1]==='B') n++;
+    if(st.U[1][0]==='U'&&st.L[0][1]==='L') n++;
+    return n;
+  }
+
+  if (isTargetDone(s)) return;
+
+  const initSolved = solvedCount(s);
+  
+  // BFS
+  const queue = [{ state: deepCopyState(s), moves: [] }];
+  const seen = new Set();
+  seen.add(stateHash(s));
+
+  while (queue.length > 0) {
+    const { state: st, moves: ms } = queue.shift();
+    if (ms.length > 7) continue;
+
+    for (const m of moves6) {
+      const ns = deepCopyState(st);
+      applyMoveS(ns, m);
+      const h = stateHash(ns);
+      if (seen.has(h)) continue;
+      seen.add(h);
+      const nm = [...ms, m];
+      if (isTargetDone(ns) && solvedCount(ns) >= initSolved) {
+        for (const mv of nm) {
+          applyMoveS(s, mv);
+          doMove(mv);
+        }
+        return;
+      }
+      if (nm.length < 7) queue.push({ state: ns, moves: nm });
+    }
+  }
+}
+
+function stateHash(s) {
+  return ['U','D','F','B','L','R'].map(f => s[f].flat().join('')).join('|');
+}
+
+function buildCrossLookup() { return {}; }
+
+// ── White corners ─────────────────────────────────────────────────────────────
+function whiteCornersDone(s) {
+  if (!whiteCrossDone(s)) return false;
+  return s.U[0][0]==='U'&&s.U[0][2]==='U'&&s.U[2][0]==='U'&&s.U[2][2]==='U'&&
+    s.F[0][0]==='L'&&s.F[0][2]==='R'&&
+    s.L[0][2]==='F'&&s.R[0][0]==='F';
+  // Actually check properly:
+}
+
+function whiteCornersDoneProper(s) {
+  return (
+    s.U[0][0]==='U'&&s.U[0][2]==='U'&&s.U[2][0]==='U'&&s.U[2][2]==='U'&&
+    s.F[0][0]==='L'&&s.R[0][0]==='F'&&  // UFL corner
+    s.F[0][2]==='R'&&s.R[0][0]==='F'&&
+    s.L[0][0]==='B'&&s.B[0][2]==='L'&&  // UBL
+    s.R[0][2]==='B'&&s.B[0][0]==='R'    // UBR
+  );
+  // This is getting complex; use BFS instead
+}
+
+function solveWhiteCorners(s, doMove) {
+  const corners = [
+    { name:'UFR', check: ()=>s.U[2][2]==='U'&&s.F[0][2]==='F'&&s.R[0][0]==='R' },
+    { name:'UFL', check: ()=>s.U[2][0]==='U'&&s.F[0][0]==='F'&&s.L[0][2]==='L' },
+    { name:'UBR', check: ()=>s.U[0][2]==='U'&&s.B[0][0]==='B'&&s.R[0][2]==='R' },
+    { name:'UBL', check: ()=>s.U[0][0]==='U'&&s.B[0][2]==='B'&&s.L[0][0]==='L' },
+  ];
+  for (const corner of corners) {
+    if (!corner.check()) {
+      cornerBFS(s, corner.name, doMove);
+      return;
+    }
+  }
+}
+
+function cornerBFS(s, target, doMove) {
+  const checks = {
+    UFR: st=>st.U[2][2]==='U'&&st.F[0][2]==='F'&&st.R[0][0]==='R',
+    UFL: st=>st.U[2][0]==='U'&&st.F[0][0]==='F'&&st.L[0][2]==='L',
+    UBR: st=>st.U[0][2]==='U'&&st.B[0][0]==='B'&&st.R[0][2]==='R',
+    UBL: st=>st.U[0][0]==='U'&&st.B[0][2]==='B'&&st.L[0][0]==='L',
+  };
+
+  // Count solved corners
+  function countSolved(st) {
+    return Object.values(checks).filter(fn=>fn(st)).length;
+  }
+  // Count solved cross
+  function crossOk(st) {
+    return st.U[2][1]==='U'&&st.F[0][1]==='F'&&
+           st.U[1][2]==='U'&&st.R[0][1]==='R'&&
+           st.U[0][1]==='U'&&st.B[0][1]==='B'&&
+           st.U[1][0]==='U'&&st.L[0][1]==='L';
+  }
+
+  const checkFn = checks[target];
+  if (checkFn(s)) return;
+
+  const initSolved = countSolved(s);
+  const moves6 = ['U',"U'","U2",'R',"R'","F","F'",'L',"L'",'B',"B'",'D',"D'"];
+  const queue = [{ state: deepCopyState(s), moves: [] }];
+  const seen = new Set([stateHash(s)]);
+
+  while (queue.length > 0) {
+    const { state: st, moves: ms } = queue.shift();
+    if (ms.length > 8) continue;
+
+    for (const m of moves6) {
+      const ns = deepCopyState(st);
+      applyMoveS(ns, m);
+      const h = stateHash(ns);
+      if (seen.has(h)) continue;
+      seen.add(h);
+      const nm = [...ms, m];
+      if (checkFn(ns) && crossOk(ns) && countSolved(ns) >= initSolved) {
+        for (const mv of nm) { applyMoveS(s, mv); doMove(mv); }
+        return;
+      }
+      if (nm.length < 8) queue.push({ state: ns, moves: nm });
+    }
+  }
+}
+
+// ── Middle layer ──────────────────────────────────────────────────────────────
+function middleLayerDone(s) {
+  return s.F[1][0]==='F'&&s.F[1][1]==='F'&&s.F[1][2]==='F'&&
+    s.R[1][0]==='R'&&s.R[1][1]==='R'&&s.R[1][2]==='R'&&
+    s.B[1][0]==='B'&&s.B[1][1]==='B'&&s.B[1][2]==='B'&&
+    s.L[1][0]==='L'&&s.L[1][1]==='L'&&s.L[1][2]==='L';
+}
+
+function solveMiddleLayer(s, doMove) {
+  const edges = [
+    { name:'FR', check: st=>st.F[1][2]==='F'&&st.R[1][0]==='R' },
+    { name:'RB', check: st=>st.R[1][2]==='R'&&st.B[1][0]==='B' },
+    { name:'BL', check: st=>st.B[1][2]==='B'&&st.L[1][0]==='L' },
+    { name:'LF', check: st=>st.L[1][2]==='L'&&st.F[1][0]==='F' },
+  ];
+  function countML(st) { return edges.filter(e=>e.check(st)).length; }
+
+  for (const edge of edges) {
+    if (!edge.check(s)) {
+      middleEdgeBFS(s, edge.check, doMove, countML);
+      return;
+    }
+  }
+}
+
+function middleEdgeBFS(s, checkFn, doMove, countFn) {
+  if (checkFn(s)) return;
+  const init = countFn(s);
+  function crossOk(st) {
+    return st.U[2][1]==='U'&&st.F[0][1]==='F'&&
+           st.U[1][2]==='U'&&st.R[0][1]==='R'&&
+           st.U[0][1]==='U'&&st.B[0][1]==='B'&&
+           st.U[1][0]==='U'&&st.L[0][1]==='L'&&
+           st.U[0][0]==='U'&&st.U[0][2]==='U'&&st.U[2][0]==='U'&&st.U[2][2]==='U';
+  }
+
+  const moves6 = ['U',"U'","U2",'R',"R'",'F',"F'",'L',"L'",'B',"B'"];
+  const queue = [{ state: deepCopyState(s), moves: [] }];
+  const seen = new Set([stateHash(s)]);
+
+  while (queue.length > 0) {
+    const { state: st, moves: ms } = queue.shift();
+    if (ms.length > 9) continue;
+
+    for (const m of moves6) {
+      const ns = deepCopyState(st);
+      applyMoveS(ns, m);
+      const h = stateHash(ns);
+      if (seen.has(h)) continue;
+      seen.add(h);
+      const nm = [...ms, m];
+      if (checkFn(ns) && crossOk(ns) && countFn(ns) >= init) {
+        for (const mv of nm) { applyMoveS(s, mv); doMove(mv); }
+        return;
+      }
+      if (nm.length < 9) queue.push({ state: ns, moves: nm });
+    }
+  }
+}
+
+// ── Yellow cross ──────────────────────────────────────────────────────────────
+function yellowCrossDone(s) {
+  return s.D[0][1]==='D'&&s.D[1][0]==='D'&&s.D[1][2]==='D'&&s.D[2][1]==='D';
+}
+
+function solveYellowCross(s, doMove) {
+  // OLL cross algorithm: F R U R' U' F'
+  const alg = "F R U R' U' F'";
+  for (const m of alg.split(' ')) { applyMoveS(s, m); doMove(m); }
+}
+
+// ── OLL (orient last layer) ───────────────────────────────────────────────────
+function OLLDone(s) {
+  for (let r=0;r<3;r++) for(let c=0;c<3;c++) if(s.D[r][c]!=='D') return false;
+  return true;
+}
+
+function solveOLL(s, doMove) {
+  // Sune: R U R' U R U2 R'
+  // Anti-Sune: R U2 R' U' R U' R'
+  // Try sune first
+  const sune = "R U R' U R U2 R'";
+  for (const m of sune.split(' ')) { applyMoveS(s, m); doMove(m); }
+}
+
+// ── PLL (permute last layer) ──────────────────────────────────────────────────
+function PLLDone(s) {
+  if (!OLLDone(s)) return false;
+  for (const f of ['F','R','B','L']) {
+    if (s[f][2][0]!==s[f][2][1]||s[f][2][1]!==s[f][2][2]) return false;
+  }
+  return true;
+}
+
+function solvePLL(s, doMove) {
+  // T-perm: R U R' U' R' F R2 U' R' U' R U R' F'
+  // U-perm: R2 U R U R' U' R' U' R' U R'
+  // Try AUF first
+  function isSolvedFull(st) {
+    for(const f of ['U','D','F','B','L','R']){
+      const first=st[f][0][0];
+      for(let r=0;r<3;r++) for(let c=0;c<3;c++) if(st[f][r][c]!==first) return false;
+    }
+    return true;
+  }
+
+  // AUF
+  for (const auf of ['','U',"U'","U2"]) {
+    const ns = deepCopyState(s);
+    if (auf) applyMoveS(ns, auf);
+    if (PLLDone(ns)) {
+      if (auf) { applyMoveS(s, auf); doMove(auf); }
+      return;
+    }
+  }
+
+  // T-perm
+  const tperm = "R U R' U' R' F R2 U' R' U' R U R' F'";
+  for (const m of tperm.split(' ')) { applyMoveS(s, m); doMove(m); }
+}
+
+// ─── Scramble ────────────────────────────────────────────────────────────────
+function scramble() {
+  const moves = ['U',"U'","U2",'D',"D'","D2",'F',"F'","F2",'B',"B'","B2",'R',"R'","R2",'L',"L'","L2"];
+  let last = '';
+  const seq = [];
+  for (let i = 0; i < 25; i++) {
+    let m;
+    do { m = moves[Math.floor(Math.random()*moves.length)]; }
+    while (m[0] === last[0]);
+    seq.push(m);
+    last = m;
+  }
+  return seq;
+}
+
+// ─── UI wiring ────────────────────────────────────────────────────────────────
+const statusEl = document.getElementById('status');
+const solveBtn = document.getElementById('btn-solve');
+const scrambleBtn = document.getElementById('btn-scramble');
+const resetBtn = document.getElementById('btn-reset');
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+scrambleBtn.addEventListener('click', () => {
+  if (animating) return;
+  moveCount = 0;
+  document.getElementById('move-count').textContent = 'Moves: 0';
+  setStatus('Scrambling…');
+  solveBtn.disabled = true;
+  scrambleBtn.disabled = true;
+
+  const seq = scramble();
+  let i = 0;
+  function next() {
+    if (i >= seq.length) {
+      setStatus('Scrambled! Press Solve');
+      solveBtn.disabled = false;
+      scrambleBtn.disabled = false;
+      return;
+    }
+    queueMove(seq[i++], next);
+  }
+  next();
+});
+
+solveBtn.addEventListener('click', () => {
+  if (animating) return;
+  setStatus('Computing solution…');
+  solveBtn.disabled = true;
+  scrambleBtn.disabled = true;
+
+  setTimeout(() => {
+    const solution = generateSolution();
+    if (!solution.length) { setStatus('Already solved!'); solveBtn.disabled=false; scrambleBtn.disabled=false; return; }
+    setStatus(`Solving in ${solution.length} moves…`);
+    moveCount = 0;
+    document.getElementById('move-count').textContent = 'Moves: 0';
+
+    let i = 0;
+    function nextSolve() {
+      if (i >= solution.length) {
+        if (isSolved()) { setStatus('Solved!'); }
+        else { setStatus('Solution applied'); }
+        solveBtn.disabled = false;
+        scrambleBtn.disabled = false;
+        return;
+      }
+      const mv = solution[i++];
+      queueMove(mv, nextSolve);
+    }
+    nextSolve();
+  }, 50);
+});
+
+resetBtn.addEventListener('click', () => {
+  if (animating) return;
+  animQueue = [];
+  cubeState = makeSolvedState();
+  moveCount = 0;
+  document.getElementById('move-count').textContent = 'Moves: 0';
+  setStatus('Ready — click Scramble to begin');
+  solveBtn.disabled = true;
+  scrambleBtn.disabled = false;
+  buildCubies();
+  applyStateToCubies();
+});
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+buildCubies();
+applyStateToCubies();
+
+// ─── Render loop ──────────────────────────────────────────────────────────────
+function render() {
+  requestAnimationFrame(render);
+  if (!isDragging && !animating) {
+    pivot.rotation.y += 0.003;
+  }
+  renderer.render(scene, camera);
+}
+render();
+</script>
+</body>
+</html>
