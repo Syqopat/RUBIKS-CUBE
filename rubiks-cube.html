@@ -1,11 +1,10 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>3D Rubik's Cube Solver</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #1a1a2e; color: #eee; font-family: Arial, sans-serif; overflow: hidden; }
   #canvas-container { width: 100vw; height: 100vh; }
   #ui {
@@ -41,14 +40,13 @@
     <button id="btn-solve" disabled>Solve</button>
     <button id="btn-reset">Reset</button>
   </div>
-  <div id="status">Ready — click Scramble to begin</div>
+  <div id="status">Ready â€” click Scramble to begin</div>
   <div id="move-count">Moves: 0</div>
   <div id="hint">Drag to rotate view</div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
-// ─── Scene setup ────────────────────────────────────────────────────────────
 const container = document.getElementById('canvas-container');
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -69,7 +67,6 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
 dirLight.position.set(10, 15, 10);
 scene.add(dirLight);
 
-// ─── Orbit controls (manual, no dep) ────────────────────────────────────────
 let isDragging = false, prevMouse = { x: 0, y: 0 };
 const pivot = new THREE.Group();
 scene.add(pivot);
@@ -101,7 +98,6 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// ─── Rubik's cube ────────────────────────────────────────────────────────────
 const COLORS = {
   U: 0xffffff, // white  top
   D: 0xffff00, // yellow bottom
@@ -112,9 +108,6 @@ const COLORS = {
   X: 0x222222, // inner face (black)
 };
 
-// Cube state: 6 faces × 9 stickers
-// Face order: U D F B L R
-// Each face stored as 3x3 array [row][col], solved state
 function makeSolvedState() {
   return {
     U: Array.from({ length: 3 }, () => Array(3).fill('U')),
@@ -131,9 +124,6 @@ let moveCount = 0;
 let animating = false;
 let solutionQueue = [];
 
-// ─── 3D cubies ───────────────────────────────────────────────────────────────
-// Each cubie is a 3x3x3 grid at positions -1,0,1 on each axis
-// Face index: +x=R, -x=L, +y=U, -y=D, +z=F, -z=B
 
 const CUBIE_SIZE = 0.93;
 const GAP = 1.0;
@@ -165,31 +155,21 @@ function buildCubies() {
         cubies.push(createCubie(x, y, z));
 }
 
-// Map state colors to cubies
 function applyStateToCubies() {
   for (const c of cubies) {
     const [x, y, z] = c.pos;
-    // +x → R face
     c.mats[0].color.setHex(x === 1  ? COLORS[sticker('R', y, z, true)] : COLORS.X);
-    // -x → L face
     c.mats[1].color.setHex(x === -1 ? COLORS[sticker('L', y, z, false)] : COLORS.X);
-    // +y → U face
     c.mats[2].color.setHex(y === 1  ? COLORS[sticker('U', x, z, true, true)] : COLORS.X);
-    // -y → D face
     c.mats[3].color.setHex(y === -1 ? COLORS[sticker('D', x, z, false, true)] : COLORS.X);
-    // +z → F face
     c.mats[4].color.setHex(z === 1  ? COLORS[sticker('F', x, y, true)] : COLORS.X);
-    // -z → B face
     c.mats[5].color.setHex(z === -1 ? COLORS[sticker('B', x, y, false)] : COLORS.X);
   }
 }
 
-// Map grid position → face sticker
-// For each face, the 3×3 grid is indexed consistently
 function sticker(face, a, b, pos, isUD) {
-  // Convert axis values -1,0,1 → 0,1,2
-  const r = 1 - b; // rows top→bottom: y=1→row0, y=-1→row2
-  const c2 = a + 1; // cols: x=-1→0, x=1→2
+  const r = 1 - b; // rows topâ†’bottom: y=1â†’row0, y=-1â†’row2
+  const c2 = a + 1; // cols: x=-1â†’0, x=1â†’2
   const r2 = 1 - a; // for top/bottom
 
   const s = cubeState[face];
@@ -202,8 +182,6 @@ function sticker(face, a, b, pos, isUD) {
   return 'X';
 }
 
-// ─── Move logic ──────────────────────────────────────────────────────────────
-// Rotate a face array 90° CW
 function rotateFaceCW(f) {
   return [
     [f[2][0], f[1][0], f[0][0]],
@@ -238,21 +216,17 @@ function _applyOnce(face, prime) {
     s.U = cw ? rotateFaceCW(s.U) : rotateFaceCCW(s.U);
     const [f0, f1, f2, f3] = [s.F[0].slice(), s.L[0].slice(), s.B[0].slice(), s.R[0].slice()];
     if (cw) { s.F[0] = f3; s.R[0] = f0; s.B[0] = [...f1].reverse().map((_, i, a) => a[a.length-1-i]); /* tricky */ }
-    // U CW: F-top → R-top, R-top → B-top(rev), B-top(rev) → L-top, L-top → F-top
     const ft = s.F[0].slice(), lt = s.L[0].slice(), bt = s.B[0].slice(), rt = s.R[0].slice();
     if (cw) {
-      s.R[0] = ft; s.B[0] = rt.slice().reverse(); // B is seen from behind — need careful reversal
+      s.R[0] = ft; s.B[0] = rt.slice().reverse(); // B is seen from behind â€” need careful reversal
       s.L[0] = bt.slice().reverse(); s.F[0] = lt;
-      // revert partial overwrites above
     }
-    // Let me redo this cleanly:
     _rotateU(cw);
     return;
   }
   _rotateGeneric(face, cw);
 }
 
-// Clean individual face rotators
 function _rotateU(cw) {
   const s = cubeState;
   s.U = cw ? rotateFaceCW(s.U) : rotateFaceCCW(s.U);
@@ -296,7 +270,6 @@ function _rotateD(cw) {
 function _rotateF(cw) {
   const s = cubeState;
   s.F = cw ? rotateFaceCW(s.F) : rotateFaceCCW(s.F);
-  // U-bottom, R-left-col, D-top(rev), L-right-col(rev)
   const ub = [s.U[2][0], s.U[2][1], s.U[2][2]];
   const rl = [s.R[0][0], s.R[1][0], s.R[2][0]];
   const dt = [s.D[0][0], s.D[0][1], s.D[0][2]];
@@ -374,7 +347,6 @@ function _rotateL(cw) {
   }
 }
 
-// Unified dispatcher
 function _rotateGeneric(face, cw) {
   if (face === 'U') _rotateU(cw);
   else if (face === 'D') _rotateD(cw);
@@ -384,7 +356,6 @@ function _rotateGeneric(face, cw) {
   else if (face === 'L') _rotateL(cw);
 }
 
-// Fix _applyOnce — just delegate
 function applyMoveImmediate(move) {
   const base = move.replace("'","").replace("2","");
   const prime = move.includes("'");
@@ -395,7 +366,6 @@ function applyMoveImmediate(move) {
   document.getElementById('move-count').textContent = `Moves: ${moveCount}`;
 }
 
-// ─── Animation ───────────────────────────────────────────────────────────────
 let animQueue = [];
 const ANIM_DURATION = 180; // ms per move
 
@@ -429,7 +399,6 @@ function animateMove(move, done) {
 }
 
 function _animateOnce(face, cw, done) {
-  // Axis & filter
   let axis, filterFn;
   if (face==='U') { axis='y'; filterFn=c=>c.pos[1]===1; }
   else if(face==='D') { axis='y'; filterFn=c=>c.pos[1]===-1; }
@@ -438,7 +407,6 @@ function _animateOnce(face, cw, done) {
   else if(face==='R') { axis='x'; filterFn=c=>c.pos[0]===1; }
   else if(face==='L') { axis='x'; filterFn=c=>c.pos[0]===-1; }
 
-  // Determine rotation direction sign
   let sign;
   if (face==='U') sign = cw ? -1 : 1;
   else if(face==='D') sign = cw ? 1 : -1;
@@ -465,15 +433,12 @@ function _animateOnce(face, cw, done) {
     if (t < 1) { requestAnimationFrame(animate); return; }
 
     group.rotation[axis] = totalAngle;
-    // Detach cubies back, update their positions
     for (const c of affected) {
       group.remove(c.mesh);
-      // Apply world transform
       const worldPos = new THREE.Vector3();
       c.mesh.getWorldPosition(worldPos);
       pivot.add(c.mesh);
       c.mesh.position.copy(pivot.worldToLocal(worldPos));
-      // Snap position to grid
       c.pos[0] = Math.round(c.mesh.position.x / GAP);
       c.pos[1] = Math.round(c.mesh.position.y / GAP);
       c.pos[2] = Math.round(c.mesh.position.z / GAP);
@@ -481,7 +446,6 @@ function _animateOnce(face, cw, done) {
     }
     pivot.remove(group);
 
-    // Update logical state
     _rotateGeneric(face, cw);
     applyStateToCubies();
     done();
@@ -489,8 +453,6 @@ function _animateOnce(face, cw, done) {
   requestAnimationFrame(animate);
 }
 
-// ─── Solver ──────────────────────────────────────────────────────────────────
-// Layer-by-layer solver using a set of algorithms
 
 function isSolved() {
   for (const face of ['U','D','F','B','L','R']) {
@@ -503,12 +465,7 @@ function isSolved() {
   return true;
 }
 
-// Generate solution using beginner's method (simplified LBL)
-// We simulate moves on a copy of state and collect the sequence
 function generateSolution() {
-  // We'll use a "God's algorithm" approximation via BFS for small states
-  // or a Thistlethwaite-inspired layer-by-layer approach.
-  // For reliability, use a well-known LBL algorithm implemented step by step.
   
   const sim = deepCopyState(cubeState);
   const moves = [];
@@ -535,38 +492,31 @@ function generateSolution() {
     for (const m of moves_str.split(' ').filter(Boolean)) doMove(m);
   }
 
-  // ── Step 1: White cross ───────────────────────────────────────────────────
-  // Find white edges and place them correctly on U face
   for (let iter = 0; iter < 40; iter++) {
     if (whiteCrossDone(sim)) break;
     solveWhiteCross(sim, doMove);
   }
 
-  // ── Step 2: White corners ─────────────────────────────────────────────────
   for (let iter = 0; iter < 40; iter++) {
     if (whiteCornersDone(sim)) break;
     solveWhiteCorners(sim, doMove);
   }
 
-  // ── Step 3: Middle layer ──────────────────────────────────────────────────
   for (let iter = 0; iter < 40; iter++) {
     if (middleLayerDone(sim)) break;
     solveMiddleLayer(sim, doMove);
   }
 
-  // ── Step 4: Yellow cross ──────────────────────────────────────────────────
   for (let iter = 0; iter < 30; iter++) {
     if (yellowCrossDone(sim)) break;
     solveYellowCross(sim, doMove);
   }
 
-  // ── Step 5: Orient last layer ─────────────────────────────────────────────
   for (let iter = 0; iter < 30; iter++) {
     if (OLLDone(sim)) break;
     solveOLL(sim, doMove);
   }
 
-  // ── Step 6: Permute last layer ────────────────────────────────────────────
   for (let iter = 0; iter < 30; iter++) {
     if (PLLDone(sim)) break;
     solvePLL(sim, doMove);
@@ -575,7 +525,6 @@ function generateSolution() {
   return moves;
 }
 
-// ── State utilities ──────────────────────────────────────────────────────────
 function deepCopyState(s) {
   const n = {};
   for (const f of ['U','D','F','B','L','R'])
@@ -678,19 +627,13 @@ function applyMoveS(s, m) {
   for (let i = 0; i < times; i++) fn(s, !prime);
 }
 
-// ── White cross ───────────────────────────────────────────────────────────────
-// White edge pieces: UF, UR, UB, UL
-// Each is identified by which face colors it has
 function whiteCrossDone(s) {
   return s.U[0][1]==='U'&&s.U[1][0]==='U'&&s.U[1][2]==='U'&&s.U[2][1]==='U'&&
     s.F[0][1]==='F'&&s.B[0][1]==='B'&&s.L[0][1]==='L'&&s.R[0][1]==='R';
 }
 
 function solveWhiteCross(s, doMove) {
-  // Try to find a white edge and bring it into position
-  // This is a simplified approach using known edge locations and algorithms
   
-  // White edges and their target positions (face, row, col)
   const edges = [
     { colors: ['U','F'], pos: [{f:'U',r:2,c:1},{f:'F',r:0,c:1}], setupMoves: '' },
     { colors: ['U','R'], pos: [{f:'U',r:1,c:2},{f:'R',r:0,c:1}], setupMoves: 'U' },
@@ -698,15 +641,11 @@ function solveWhiteCross(s, doMove) {
     { colors: ['U','L'], pos: [{f:'U',r:1,c:0},{f:'L',r:0,c:1}], setupMoves: "U'" },
   ];
   
-  // Find white edges in bottom layer and bring up
-  // Check all possible edge positions
   const allEdgePos = [
-    // Bottom layer
     {pos:[{f:'D',r:2,c:1},{f:'F',r:2,c:1}],face:'F',alg:"F2"},
     {pos:[{f:'D',r:1,c:2},{f:'R',r:2,c:1}],face:'R',alg:"R2"},
     {pos:[{f:'D',r:0,c:1},{f:'B',r:2,c:1}],face:'B',alg:"B2"},
     {pos:[{f:'D',r:1,c:0},{f:'L',r:2,c:1}],face:'L',alg:"L2"},
-    // Middle layer
     {pos:[{f:'F',r:1,c:2},{f:'R',r:1,c:0}],face:'FR',alg:"R U' R'"},
     {pos:[{f:'R',r:1,c:2},{f:'B',r:1,c:0}],face:'RB',alg:"B U' B'"},
     {pos:[{f:'B',r:1,c:2},{f:'L',r:1,c:0}],face:'BL',alg:"L U' L'"},
@@ -715,14 +654,10 @@ function solveWhiteCross(s, doMove) {
     {pos:[{f:'R',r:1,c:0},{f:'F',r:1,c:2}],face:'RF',alg:"R' U R"},
     {pos:[{f:'B',r:1,c:0},{f:'R',r:1,c:2}],face:'BR',alg:"B' U B"},
     {pos:[{f:'L',r:1,c:0},{f:'B',r:1,c:2}],face:'LB',alg:"L' U L"},
-    // Top face wrong orientation
     {pos:[{f:'U',r:2,c:1},{f:'F',r:0,c:1}],face:'UF',alg:"F2"},
   ];
 
-  // We'll use a simpler exhaustive BFS for cross (max ~12 moves)
-  // Actually use a programmatic approach
   
-  // Find which U-face edges are already solved
   const solved = {
     UF: s.U[2][1]==='U'&&s.F[0][1]==='F',
     UR: s.U[1][2]==='U'&&s.R[0][1]==='R',
@@ -730,7 +665,6 @@ function solveWhiteCross(s, doMove) {
     UL: s.U[1][0]==='U'&&s.L[0][1]==='L',
   };
 
-  // Find a white edge that isn't solved
   const edgePairs = [
     { name:'UF', loc: findEdge(s,'U','F') },
     { name:'UR', loc: findEdge(s,'U','R') },
@@ -747,7 +681,6 @@ function solveWhiteCross(s, doMove) {
 }
 
 function findEdge(s, c1, c2) {
-  // Find position of edge containing colors c1 and c2
   const edgePositions = [
     {cells:[{f:'U',r:2,c:1},{f:'F',r:0,c:1}]},
     {cells:[{f:'U',r:1,c:2},{f:'R',r:0,c:1}]},
@@ -771,25 +704,17 @@ function findEdge(s, c1, c2) {
 
 function bringEdgeToTop(s, loc, target, doMove) {
   if (!loc) return;
-  // target = 'UF','UR','UB','UL'
-  // Move edge to D face first if not there or U
   const cells = loc.cells;
   const faces = cells.map(c=>c.f);
   
-  // Determine which face-pair and use a lookup table
   const fp = new Set(faces.map(f => f==='U'||f==='D' ? f : f));
   
-  // Simple: if in D layer, bring up directly
-  // Map edge position to move sequence
   const lookupTable = buildCrossLookup();
   const key = JSON.stringify(cells.map(({f,r,c})=>f).sort());
-  // Use BFS on the state
   crossBFS(s, target, doMove);
 }
 
 function crossBFS(s, target, doMove) {
-  // Find the target edge (e.g. 'UF' = white on U, F-color on F)
-  // BFS with max depth 7
   const targetFace = target[1]; // F,R,B,L
   const moves6 = ['U',"U'","U2",'D',"D'","D2",'F',"F'","F2",'B',"B'","B2",'R',"R'",'R2','L',"L'",'L2'];
   
@@ -812,7 +737,6 @@ function crossBFS(s, target, doMove) {
 
   const initSolved = solvedCount(s);
   
-  // BFS
   const queue = [{ state: deepCopyState(s), moves: [] }];
   const seen = new Set();
   seen.add(stateHash(s));
@@ -846,13 +770,11 @@ function stateHash(s) {
 
 function buildCrossLookup() { return {}; }
 
-// ── White corners ─────────────────────────────────────────────────────────────
 function whiteCornersDone(s) {
   if (!whiteCrossDone(s)) return false;
   return s.U[0][0]==='U'&&s.U[0][2]==='U'&&s.U[2][0]==='U'&&s.U[2][2]==='U'&&
     s.F[0][0]==='L'&&s.F[0][2]==='R'&&
     s.L[0][2]==='F'&&s.R[0][0]==='F';
-  // Actually check properly:
 }
 
 function whiteCornersDoneProper(s) {
@@ -863,7 +785,6 @@ function whiteCornersDoneProper(s) {
     s.L[0][0]==='B'&&s.B[0][2]==='L'&&  // UBL
     s.R[0][2]==='B'&&s.B[0][0]==='R'    // UBR
   );
-  // This is getting complex; use BFS instead
 }
 
 function solveWhiteCorners(s, doMove) {
@@ -889,11 +810,9 @@ function cornerBFS(s, target, doMove) {
     UBL: st=>st.U[0][0]==='U'&&st.B[0][2]==='B'&&st.L[0][0]==='L',
   };
 
-  // Count solved corners
   function countSolved(st) {
     return Object.values(checks).filter(fn=>fn(st)).length;
   }
-  // Count solved cross
   function crossOk(st) {
     return st.U[2][1]==='U'&&st.F[0][1]==='F'&&
            st.U[1][2]==='U'&&st.R[0][1]==='R'&&
@@ -929,7 +848,6 @@ function cornerBFS(s, target, doMove) {
   }
 }
 
-// ── Middle layer ──────────────────────────────────────────────────────────────
 function middleLayerDone(s) {
   return s.F[1][0]==='F'&&s.F[1][1]==='F'&&s.F[1][2]==='F'&&
     s.R[1][0]==='R'&&s.R[1][1]==='R'&&s.R[1][2]==='R'&&
@@ -989,32 +907,25 @@ function middleEdgeBFS(s, checkFn, doMove, countFn) {
   }
 }
 
-// ── Yellow cross ──────────────────────────────────────────────────────────────
 function yellowCrossDone(s) {
   return s.D[0][1]==='D'&&s.D[1][0]==='D'&&s.D[1][2]==='D'&&s.D[2][1]==='D';
 }
 
 function solveYellowCross(s, doMove) {
-  // OLL cross algorithm: F R U R' U' F'
   const alg = "F R U R' U' F'";
   for (const m of alg.split(' ')) { applyMoveS(s, m); doMove(m); }
 }
 
-// ── OLL (orient last layer) ───────────────────────────────────────────────────
 function OLLDone(s) {
   for (let r=0;r<3;r++) for(let c=0;c<3;c++) if(s.D[r][c]!=='D') return false;
   return true;
 }
 
 function solveOLL(s, doMove) {
-  // Sune: R U R' U R U2 R'
-  // Anti-Sune: R U2 R' U' R U' R'
-  // Try sune first
   const sune = "R U R' U R U2 R'";
   for (const m of sune.split(' ')) { applyMoveS(s, m); doMove(m); }
 }
 
-// ── PLL (permute last layer) ──────────────────────────────────────────────────
 function PLLDone(s) {
   if (!OLLDone(s)) return false;
   for (const f of ['F','R','B','L']) {
@@ -1024,9 +935,6 @@ function PLLDone(s) {
 }
 
 function solvePLL(s, doMove) {
-  // T-perm: R U R' U' R' F R2 U' R' U' R U R' F'
-  // U-perm: R2 U R U R' U' R' U' R' U R'
-  // Try AUF first
   function isSolvedFull(st) {
     for(const f of ['U','D','F','B','L','R']){
       const first=st[f][0][0];
@@ -1035,7 +943,6 @@ function solvePLL(s, doMove) {
     return true;
   }
 
-  // AUF
   for (const auf of ['','U',"U'","U2"]) {
     const ns = deepCopyState(s);
     if (auf) applyMoveS(ns, auf);
@@ -1045,12 +952,10 @@ function solvePLL(s, doMove) {
     }
   }
 
-  // T-perm
   const tperm = "R U R' U' R' F R2 U' R' U' R U R' F'";
   for (const m of tperm.split(' ')) { applyMoveS(s, m); doMove(m); }
 }
 
-// ─── Scramble ────────────────────────────────────────────────────────────────
 function scramble() {
   const moves = ['U',"U'","U2",'D',"D'","D2",'F',"F'","F2",'B',"B'","B2",'R',"R'","R2",'L',"L'","L2"];
   let last = '';
@@ -1065,7 +970,6 @@ function scramble() {
   return seq;
 }
 
-// ─── UI wiring ────────────────────────────────────────────────────────────────
 const statusEl = document.getElementById('status');
 const solveBtn = document.getElementById('btn-solve');
 const scrambleBtn = document.getElementById('btn-scramble');
@@ -1077,7 +981,7 @@ scrambleBtn.addEventListener('click', () => {
   if (animating) return;
   moveCount = 0;
   document.getElementById('move-count').textContent = 'Moves: 0';
-  setStatus('Scrambling…');
+  setStatus('Scramblingâ€¦');
   solveBtn.disabled = true;
   scrambleBtn.disabled = true;
 
@@ -1097,14 +1001,14 @@ scrambleBtn.addEventListener('click', () => {
 
 solveBtn.addEventListener('click', () => {
   if (animating) return;
-  setStatus('Computing solution…');
+  setStatus('Computing solutionâ€¦');
   solveBtn.disabled = true;
   scrambleBtn.disabled = true;
 
   setTimeout(() => {
     const solution = generateSolution();
     if (!solution.length) { setStatus('Already solved!'); solveBtn.disabled=false; scrambleBtn.disabled=false; return; }
-    setStatus(`Solving in ${solution.length} moves…`);
+    setStatus(`Solving in ${solution.length} movesâ€¦`);
     moveCount = 0;
     document.getElementById('move-count').textContent = 'Moves: 0';
 
@@ -1130,18 +1034,16 @@ resetBtn.addEventListener('click', () => {
   cubeState = makeSolvedState();
   moveCount = 0;
   document.getElementById('move-count').textContent = 'Moves: 0';
-  setStatus('Ready — click Scramble to begin');
+  setStatus('Ready â€” click Scramble to begin');
   solveBtn.disabled = true;
   scrambleBtn.disabled = false;
   buildCubies();
   applyStateToCubies();
 });
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
 buildCubies();
 applyStateToCubies();
 
-// ─── Render loop ──────────────────────────────────────────────────────────────
 function render() {
   requestAnimationFrame(render);
   if (!isDragging && !animating) {
